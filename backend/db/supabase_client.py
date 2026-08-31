@@ -1,0 +1,295 @@
+"""
+Supabase client abstraction with in-memory fallback.
+Spec Section 10/12: Supabase is primary, but system must run without it for local demo/tests.
+"""
+from __future__ import annotations
+
+import os
+import uuid
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import pytz
+
+logger = logging.getLogger(__name__)
+UTC = pytz.timezone("UTC")
+
+
+class InMemoryDB:
+    """In-memory fallback that mirrors Supabase tables."""
+
+    def __init__(self):
+        self.customers: Dict[str, Dict[str, Any]] = {}
+        self.payment_events: List[Dict[str, Any]] = []
+        self.retry_decisions: List[Dict[str, Any]] = []
+        self.demo_batches: List[Dict[str, Any]] = []
+        self.webhook_log: List[Dict[str, Any]] = []
+
+    # Customers
+    def upsert_customer(self, customer_id: str, hidden_profile_tag: str | None = None):
+        if customer_id not in self.customers:
+            self.customers[customer_id] = {
+                "customer_id": customer_id,
+                "hidden_profile_tag": hidden_profile_tag,
+                "created_at": datetime.now(UTC),
+            }
+
+    def list_customers(self) -> List[Dict[str, Any]]:
+        return list(self.customers.values())
+
+    # Payment events
+    def insert_payment_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        ev = {**event}
+        if "id" not in ev:
+            ev["id"] = str(uuid.uuid4())
+        if "created_at" not in ev:
+            ev["created_at"] = datetime.now(UTC)
+        self.payment_events.append(ev)
+        # ensure customer exists
+        if ev.get("customer_id"):
+            self.upsert_customer(ev["customer_id"])
+        return ev
+
+    def get_success_events_for_customer(self, customer_id: str) -> List[Dict[str, Any]]:
+        return [e for e in self.payment_events if e["customer_id"] == customer_id and e["status"] == "success"]
+
+    def get_all_success_events(self) -> List[Dict[str, Any]]:
+        return [e for e in self.payment_events if e["status"] == "success"]
+
+    def list_payment_events(self, customer_id: Optional[str] = None, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        res = self.payment_events
+        if customer_id:
+            res = [e for e in res if e["customer_id"] == customer_id]
+        if status:
+            res = [e for e in res if e["status"] == status]
+        return res
+
+    # Retry decisions
+    def insert_retry_decision(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        d = {**decision}
+        if "decision_id" not in d:
+            d["decision_id"] = str(uuid.uuid4())
+        if "created_at" not in d:
+            d["created_at"] = datetime.now(UTC)
+        if "actual_retry_outcome" not in d:
+            d["actual_retry_outcome"] = "pending"
+        self.retry_decisions.append(d)
+        return d
+
+    def list_retry_decisions(self, customer_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if customer_id:
+            return [d for d in self.retry_decisions if d["customer_id"] == customer_id]
+        return list(self.retry_decisions)
+
+    def update_retry_outcome(self, decision_id: str, outcome: str, executed_at: Optional[datetime] = None):
+        for d in self.retry_decisions:
+            if str(d.get("decision_id")) == str(decision_id):
+                d["actual_retry_outcome"] = outcome
+                d["actual_retry_executed_at"] = executed_at or datetime.now(UTC)
+                return d
+        return None
+
+    # Demo batches
+    def insert_demo_batch(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        b = {**batch}
+        if "batch_id" not in b:
+            b["batch_id"] = str(uuid.uuid4())
+        if "created_at" not in b:
+            b["created_at"] = datetime.now(UTC)
+        self.demo_batches.append(b)
+        return b
+
+    def list_demo_batches(self) -> List[Dict[str, Any]]:
+        return list(self.demo_batches)
+
+    # Webhook log
+    def insert_webhook_log(self, event_type: str, raw_payload: Dict[str, Any], processed: bool = False):
+        entry = {
+            "id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "raw_payload": raw_payload,
+            "processed": processed,
+            "received_at": datetime.now(UTC),
+        }
+        self.webhook_log.append(entry)
+        return entry
+
+    def list_webhook_logs(self) -> List[Dict[str, Any]]:
+        return list(self.webhook_log)
+
+
+class SupabaseDB:
+    """Thin wrapper around real Supabase if credentials present."""
+
+    def __init__(self, url: str, key: str):
+        from supabase import create_client
+
+        self.client = create_client(url, key)
+
+    # For brevity, delegate to supabase queries; fallback to in-memory shape
+    # Customers
+    def upsert_customer(self, customer_id: str, hidden_profile_tag: str | None = None):
+        try:
+            self.client.table("customers").upsert({"customer_id": customer_id, "hidden_profile_tag": hidden_profile_tag}).execute()
+        except Exception as e:
+            logger.warning(f"Supabase upsert_customer failed: {e}")
+
+    def list_customers(self):
+        try:
+            r = self.client.table("customers").select("*").execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning(f"list_customers failed: {e}")
+            return []
+
+    def insert_payment_event(self, event: Dict[str, Any]):
+        # Convert datetime to isoformat for supabase
+        payload = _serialize_datetimes(event)
+        try:
+            r = self.client.table("payment_events").insert(payload).execute()
+            return r.data[0] if r.data else event
+        except Exception as e:
+            logger.warning(f"insert_payment_event failed: {e}")
+            return event
+
+    def get_success_events_for_customer(self, customer_id: str):
+        try:
+            r = self.client.table("payment_events").select("*").eq("customer_id", customer_id).eq("status", "success").execute()
+            return [_deserialize_datetimes(x) for x in (r.data or [])]
+        except Exception as e:
+            logger.warning(f"get_success failed: {e}")
+            return []
+
+    def get_all_success_events(self):
+        try:
+            r = self.client.table("payment_events").select("*").eq("status", "success").execute()
+            return [_deserialize_datetimes(x) for x in (r.data or [])]
+        except Exception as e:
+            logger.warning(f"get_all_success failed: {e}")
+            return []
+
+    def list_payment_events(self, customer_id=None, status=None):
+        try:
+            q = self.client.table("payment_events").select("*")
+            if customer_id:
+                q = q.eq("customer_id", customer_id)
+            if status:
+                q = q.eq("status", status)
+            r = q.execute()
+            return [_deserialize_datetimes(x) for x in (r.data or [])]
+        except Exception as e:
+            logger.warning(f"list_payment_events failed: {e}")
+            return []
+
+    def insert_retry_decision(self, decision: Dict[str, Any]):
+        payload = _serialize_datetimes(decision)
+        try:
+            r = self.client.table("retry_decisions").insert(payload).execute()
+            return r.data[0] if r.data else decision
+        except Exception as e:
+            logger.warning(f"insert_retry_decision failed: {e}")
+            return decision
+
+    def list_retry_decisions(self, customer_id=None):
+        try:
+            q = self.client.table("retry_decisions").select("*")
+            if customer_id:
+                q = q.eq("customer_id", customer_id)
+            q = q.order("created_at", desc=True)
+            r = q.execute()
+            return [_deserialize_datetimes(x) for x in (r.data or [])]
+        except Exception as e:
+            logger.warning(f"list_retry_decisions failed: {e}")
+            return []
+
+    def update_retry_outcome(self, decision_id: str, outcome: str, executed_at=None):
+        try:
+            payload = {"actual_retry_outcome": outcome, "actual_retry_executed_at": (executed_at or datetime.now(UTC)).isoformat()}
+            r = self.client.table("retry_decisions").update(payload).eq("decision_id", decision_id).execute()
+            return r.data[0] if r.data else None
+        except Exception as e:
+            logger.warning(f"update_retry_outcome failed: {e}")
+            return None
+
+    def insert_demo_batch(self, batch: Dict[str, Any]):
+        payload = _serialize_datetimes(batch)
+        try:
+            r = self.client.table("demo_batches").insert(payload).execute()
+            return r.data[0] if r.data else batch
+        except Exception as e:
+            logger.warning(f"insert_demo_batch failed: {e}")
+            return batch
+
+    def list_demo_batches(self):
+        try:
+            r = self.client.table("demo_batches").select("*").order("created_at", desc=True).execute()
+            return [_deserialize_datetimes(x) for x in (r.data or [])]
+        except Exception as e:
+            logger.warning(f"list_demo_batches failed: {e}")
+            return []
+
+    def insert_webhook_log(self, event_type: str, raw_payload: Dict[str, Any], processed: bool = False):
+        payload = {"event_type": event_type, "raw_payload": raw_payload, "processed": processed}
+        try:
+            r = self.client.table("webhook_log").insert(payload).execute()
+            return r.data[0] if r.data else payload
+        except Exception as e:
+            logger.warning(f"insert_webhook_log failed: {e}")
+            return payload
+
+    def list_webhook_logs(self):
+        try:
+            r = self.client.table("webhook_log").select("*").order("received_at", desc=True).execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning(f"list_webhook_logs failed: {e}")
+            return []
+
+
+def _serialize_datetimes(d: Dict[str, Any]) -> Dict[str, Any]:
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
+def _deserialize_datetimes(d: Dict[str, Any]) -> Dict[str, Any]:
+    out = {}
+    for k, v in d.items():
+        if k in ("attempted_at", "created_at", "recommended_retry_at", "original_failure_at", "actual_retry_executed_at", "received_at") and isinstance(v, str):
+            try:
+                # Handle ISO with Z
+                if v.endswith("Z"):
+                    v = v.replace("Z", "+00:00")
+                out[k] = datetime.fromisoformat(v)
+            except Exception:
+                out[k] = v
+        else:
+            out[k] = v
+    return out
+
+
+# Singleton factory
+_db_instance: Optional[Any] = None
+
+
+def get_db():
+    global _db_instance
+    if _db_instance is not None:
+        return _db_instance
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if url and key:
+        try:
+            _db_instance = SupabaseDB(url, key)
+            logger.info("Using Supabase DB")
+            return _db_instance
+        except Exception as e:
+            logger.warning(f"Supabase init failed, falling back to in-memory: {e}")
+    logger.info("Using InMemoryDB (no Supabase credentials)")
+    _db_instance = InMemoryDB()
+    return _db_instance
