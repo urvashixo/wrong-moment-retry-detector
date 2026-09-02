@@ -26,16 +26,20 @@ from backend.llm.groq_client import get_groq_client
 from backend.webhooks.razorpay_webhook import handle_razorpay_webhook
 from backend.scheduler.retry_executor import schedule_retry, simulate_retry_execution, list_jobs
 
-# Load .env if present
+# Load .env if present — robust to cwd differences
 try:
     from dotenv import load_dotenv  # type: ignore
 
     load_dotenv()
+    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 except Exception:
     pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+logger.info(f"Env loaded: SUPABASE_URL={'set' if os.getenv('SUPABASE_URL') else 'missing'} GROQ_API_KEY={'set' if os.getenv('GROQ_API_KEY') else 'missing'} GROQ_MODEL={os.getenv('GROQ_MODEL')}")
 
 UTC = pytz.timezone("UTC")
 IST = pytz.timezone("Asia/Kolkata")

@@ -10,6 +10,17 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+# Auto-load .env so get_db() works even when called before main.py loads it
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    # also try project root .env one level above backend
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"))
+    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
+except Exception:
+    pass
+
 import pytz
 
 logger = logging.getLogger(__name__)
@@ -119,6 +130,27 @@ class InMemoryDB:
         return list(self.webhook_log)
 
 
+def _is_rls_error(e: Exception) -> bool:
+    msg = str(e)
+    return "42501" in msg or "row-level security" in msg.lower() or "row violates row-level security" in msg.lower()
+
+
+RLS_FIX_SQL = """
+-- Run this in Supabase SQL Editor (https://supabase.com/dashboard/project/_/sql):
+alter table customers disable row level security;
+alter table payment_events disable row level security;
+alter table retry_decisions disable row level security;
+alter table demo_batches disable row level security;
+alter table webhook_log disable row level security;
+-- Or, if you prefer to keep RLS, create permissive policies:
+-- create policy "Allow all" on customers for all using (true) with check (true);
+-- create policy "Allow all" on payment_events for all using (true) with check (true);
+-- create policy "Allow all" on retry_decisions for all using (true) with check (true);
+-- create policy "Allow all" on demo_batches for all using (true) with check (true);
+-- create policy "Allow all" on webhook_log for all using (true) with check (true);
+"""
+
+
 class SupabaseDB:
     """Thin wrapper around real Supabase if credentials present."""
 
@@ -126,6 +158,20 @@ class SupabaseDB:
         from supabase import create_client
 
         self.client = create_client(url, key)
+        self.url = url
+        self.key = key
+        # also keep an in-memory fallback for writes when RLS blocks
+        self._fallback = InMemoryDB()
+        self._rls_warned = False
+
+    def _warn_rls_once(self, e: Exception):
+        if _is_rls_error(e) and not self._rls_warned:
+            self._rls_warned = True
+            logger.error(
+                "Supabase RLS is blocking writes (42501). Your publishable key cannot insert. "
+                "Fix: In Supabase Dashboard -> SQL Editor, run:\n" + RLS_FIX_SQL +
+                "\nOr add a SECRET/SERVICE_ROLE key as SUPABASE_SECRET_KEY or SUPABASE_SERVICE_KEY in .env (sb_secret_...), then restart."
+            )
 
     # For brevity, delegate to supabase queries; fallback to in-memory shape
     # Customers
@@ -133,41 +179,61 @@ class SupabaseDB:
         try:
             self.client.table("customers").upsert({"customer_id": customer_id, "hidden_profile_tag": hidden_profile_tag}).execute()
         except Exception as e:
-            logger.warning(f"Supabase upsert_customer failed: {e}")
+            self._warn_rls_once(e)
+            logger.warning(f"Supabase upsert_customer failed: {e} — using in-memory fallback for this write")
+            self._fallback.upsert_customer(customer_id, hidden_profile_tag)
 
     def list_customers(self):
         try:
             r = self.client.table("customers").select("*").execute()
-            return r.data or []
+            supa = r.data or []
+            # merge fallback (writes that were blocked by RLS)
+            fb = self._fallback.list_customers()
+            if fb:
+                # merge by customer_id, supabase wins
+                seen = {c["customer_id"] for c in supa}
+                supa.extend([c for c in fb if c["customer_id"] not in seen])
+            return supa
         except Exception as e:
             logger.warning(f"list_customers failed: {e}")
-            return []
+            return self._fallback.list_customers()
 
     def insert_payment_event(self, event: Dict[str, Any]):
-        # Convert datetime to isoformat for supabase
         payload = _serialize_datetimes(event)
         try:
             r = self.client.table("payment_events").insert(payload).execute()
             return r.data[0] if r.data else event
         except Exception as e:
-            logger.warning(f"insert_payment_event failed: {e}")
-            return event
+            self._warn_rls_once(e)
+            logger.warning(f"insert_payment_event failed: {e} — fallback")
+            return self._fallback.insert_payment_event(event)
 
     def get_success_events_for_customer(self, customer_id: str):
         try:
             r = self.client.table("payment_events").select("*").eq("customer_id", customer_id).eq("status", "success").execute()
-            return [_deserialize_datetimes(x) for x in (r.data or [])]
+            supa = [_deserialize_datetimes(x) for x in (r.data or [])]
+            fb = self._fallback.get_success_events_for_customer(customer_id)
+            # merge fallback events that aren't in supa (by id)
+            if fb:
+                supa_ids = {e.get("id") for e in supa}
+                supa.extend([e for e in fb if e.get("id") not in supa_ids])
+            return supa
         except Exception as e:
             logger.warning(f"get_success failed: {e}")
-            return []
+            return self._fallback.get_success_events_for_customer(customer_id)
 
     def get_all_success_events(self):
         try:
             r = self.client.table("payment_events").select("*").eq("status", "success").execute()
-            return [_deserialize_datetimes(x) for x in (r.data or [])]
+            supa = [_deserialize_datetimes(x) for x in (r.data or [])]
+            fb = self._fallback.get_all_success_events()
+            if fb:
+                supa_ids = {e.get("id") for e in supa}
+                supa.extend([e for e in fb if e.get("id") not in supa_ids])
+            return supa
         except Exception as e:
             logger.warning(f"get_all_success failed: {e}")
-            return []
+            return self._fallback.get_all_success_events()
 
     def list_payment_events(self, customer_id=None, status=None):
         try:
@@ -177,10 +243,15 @@ class SupabaseDB:
             if status:
                 q = q.eq("status", status)
             r = q.execute()
-            return [_deserialize_datetimes(x) for x in (r.data or [])]
+            supa = [_deserialize_datetimes(x) for x in (r.data or [])]
+            fb = self._fallback.list_payment_events(customer_id=customer_id, status=status)
+            if fb:
+                supa_ids = {e.get("id") for e in supa}
+                supa.extend([e for e in fb if e.get("id") not in supa_ids])
+            return supa
         except Exception as e:
             logger.warning(f"list_payment_events failed: {e}")
-            return []
+            return self._fallback.list_payment_events(customer_id=customer_id, status=status)
 
     def insert_retry_decision(self, decision: Dict[str, Any]):
         payload = _serialize_datetimes(decision)
@@ -188,8 +259,9 @@ class SupabaseDB:
             r = self.client.table("retry_decisions").insert(payload).execute()
             return r.data[0] if r.data else decision
         except Exception as e:
-            logger.warning(f"insert_retry_decision failed: {e}")
-            return decision
+            self._warn_rls_once(e)
+            logger.warning(f"insert_retry_decision failed: {e} — fallback")
+            return self._fallback.insert_retry_decision(decision)
 
     def list_retry_decisions(self, customer_id=None):
         try:
@@ -198,10 +270,20 @@ class SupabaseDB:
                 q = q.eq("customer_id", customer_id)
             q = q.order("created_at", desc=True)
             r = q.execute()
-            return [_deserialize_datetimes(x) for x in (r.data or [])]
+            supa = [_deserialize_datetimes(x) for x in (r.data or [])]
+            fb = self._fallback.list_retry_decisions(customer_id=customer_id)
+            if fb:
+                supa_ids = {str(e.get("decision_id")) for e in supa}
+                supa.extend([e for e in fb if str(e.get("decision_id")) not in supa_ids])
+                # sort merged
+                try:
+                    supa.sort(key=lambda d: d.get("created_at") or "", reverse=True)
+                except Exception:
+                    pass
+            return supa
         except Exception as e:
             logger.warning(f"list_retry_decisions failed: {e}")
-            return []
+            return self._fallback.list_retry_decisions(customer_id=customer_id)
 
     def update_retry_outcome(self, decision_id: str, outcome: str, executed_at=None):
         try:
@@ -218,16 +300,22 @@ class SupabaseDB:
             r = self.client.table("demo_batches").insert(payload).execute()
             return r.data[0] if r.data else batch
         except Exception as e:
-            logger.warning(f"insert_demo_batch failed: {e}")
-            return batch
+            self._warn_rls_once(e)
+            logger.warning(f"insert_demo_batch failed: {e} — fallback")
+            return self._fallback.insert_demo_batch(batch)
 
     def list_demo_batches(self):
         try:
             r = self.client.table("demo_batches").select("*").order("created_at", desc=True).execute()
-            return [_deserialize_datetimes(x) for x in (r.data or [])]
+            supa = [_deserialize_datetimes(x) for x in (r.data or [])]
+            fb = self._fallback.list_demo_batches()
+            if fb:
+                supa_ids = {str(e.get("batch_id")) for e in supa}
+                supa.extend([e for e in fb if str(e.get("batch_id")) not in supa_ids])
+            return supa
         except Exception as e:
             logger.warning(f"list_demo_batches failed: {e}")
-            return []
+            return self._fallback.list_demo_batches()
 
     def insert_webhook_log(self, event_type: str, raw_payload: Dict[str, Any], processed: bool = False):
         payload = {"event_type": event_type, "raw_payload": raw_payload, "processed": processed}
@@ -235,8 +323,9 @@ class SupabaseDB:
             r = self.client.table("webhook_log").insert(payload).execute()
             return r.data[0] if r.data else payload
         except Exception as e:
-            logger.warning(f"insert_webhook_log failed: {e}")
-            return payload
+            self._warn_rls_once(e)
+            logger.warning(f"insert_webhook_log failed: {e} — fallback")
+            return self._fallback.insert_webhook_log(event_type, raw_payload, processed)
 
     def list_webhook_logs(self):
         try:
@@ -282,14 +371,30 @@ def get_db():
     if _db_instance is not None:
         return _db_instance
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    # Prefer secret/service_role key if available (needed for RLS writes)
+    # New Supabase uses sb_secret_*, legacy uses service_role
+    key = (
+        os.getenv("SUPABASE_SECRET_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_KEY")
+        or os.getenv("SUPABASE_ANON_KEY")
+    )
     if url and key:
         try:
             _db_instance = SupabaseDB(url, key)
-            logger.info("Using Supabase DB")
+            # quick probe: if key is publishable and RLS blocks, we'll warn on first write but still use hybrid
+            key_type = "secret/service_role" if key.startswith("sb_secret") or "service" in key.lower()[:30] else "publishable/anon"
+            logger.info(f"Using Supabase DB ({key_type} key) at {url[:40]}...")
             return _db_instance
         except Exception as e:
             logger.warning(f"Supabase init failed, falling back to in-memory: {e}")
     logger.info("Using InMemoryDB (no Supabase credentials)")
     _db_instance = InMemoryDB()
     return _db_instance
+
+
+def reset_db_for_testing():
+    """Helper to force re-init after env change (used in tests)."""
+    global _db_instance
+    _db_instance = None
