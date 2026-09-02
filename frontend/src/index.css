@@ -1,3 +1,67 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Silkscreen:wght@400;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --bg: #0A0A0A;
+  --panel: #111111;
+  --line: #2A2A2A;
+  --text-primary: #EDEDED;
+  --text-dim: #7A7A7A;
+  --heat-1: #E8432C;
+  --heat-2: #F07C2E;
+  --heat-3: #F5B93B;
+  --heat-4: #F8E14A;
+  --success: #3ECF8E;
+}
+
+* { scrollbar-width: thin; scrollbar-color: var(--line) var(--bg); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line); }
+
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.display-num {
+  font-family: 'Silkscreen', monospace;
+  letter-spacing: -0.02em;
+}
+
+/* hairline utils */
+.hairline { border-color: var(--line); }
+.panel { background: var(--panel); border: 1px solid var(--line); }
+
+/* bracket live value */
+.bracket {
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+}
+
+/* focus bracket outline per spec 5 */
+*:focus-visible {
+  outline: 1px solid var(--text-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px var(--text-primary);
+}
+
+/* heat helpers */
+.heat-1 { color: var(--heat-1); border-color: var(--heat-1); }
+.heat-2 { color: var(--heat-2); border-color: var(--heat-2); }
+.heat-3 { color: var(--heat-3); border-color: var(--heat-3); }
+.heat-4 { color: var(--heat-4); border-color: var(--heat-4); }
+
+/* reduce motion */
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
