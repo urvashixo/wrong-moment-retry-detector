@@ -45,21 +45,23 @@ export default function SimulationControls({ onUpdate }) {
           <div style={{color:'var(--text-dim)'}} className="mt-1">synthetic customers + history</div>
         </button>
 
-        <div className="panel p-0 flex flex-col" style={{background:'var(--bg)'}}>
-          <label className="text-[11px] tracking-widest px-3 pt-2" style={{color:'var(--text-dim)'}}>02 inject</label>
-          <div className="flex gap-2 p-2">
+        <div className="panel p-0 flex flex-col overflow-hidden min-w-0" style={{background:'var(--bg)'}}>
+          <label className="text-[11px] tracking-widest px-3 pt-2 shrink-0" style={{color:'var(--text-dim)'}}>02 inject</label>
+          <div className="flex gap-2 p-2 min-w-0">
             <select value={selected} onChange={e=>setSelected(e.target.value)}
-              className="flex-1 text-xs px-2 py-2"
+              className="flex-1 min-w-0 w-full text-xs px-2 py-2 truncate"
               style={{background:'var(--panel)', border:'1px solid var(--line)', color:'var(--text-primary)'}}>
-              {customers.map(c=> <option key={c.customer_id} value={c.customer_id}>{c.customer_id.slice(0,14)} · {c.hidden_profile_tag}</option>)}
+              {customers.map(c=> <option key={c.customer_id} value={c.customer_id}>{c.customer_id.slice(0,10)} · {(c.hidden_profile_tag||'').slice(0,12)}</option>)}
               {customers.length===0 && <option>no customers — generate first</option>}
             </select>
           </div>
-          <button onClick={()=>post('/api/retry/inject-failure', {customer_id:selected})}
-            className="mx-2 mb-2 text-xs py-2"
-            style={{background:'var(--heat-1)', color:'white', border:'1px solid var(--heat-1)'}}>
-            inject failure
-          </button>
+          <div className="px-2 pb-2">
+            <button onClick={()=>post('/api/retry/inject-failure', {customer_id:selected})}
+              className="w-full text-xs py-2 truncate"
+              style={{background:'var(--heat-1)', color:'white', border:'1px solid var(--heat-1)'}}>
+              inject failure
+            </button>
+          </div>
         </div>
 
         <div className="panel p-3 flex flex-col justify-between" style={{background:'var(--bg)'}}>
