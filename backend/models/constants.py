@@ -29,6 +29,17 @@ TIMEZONE_UTC = "UTC"
 # Retry quota awareness
 QUOTA_CAP_DAYS_SINGLE_RETRY_LEFT = 3  # if only 1 retry left, don't schedule beyond failed_at + 3d
 
+# Feature 4: escalation guardrail
+CONFIDENCE_ESCALATION_THRESHOLD = 0.50  # below this + last retry => needs_human_review
+
+# Feature 6: A/B split
+AB_FIXED_RETRY_DAYS = 3  # group A naive fixed schedule
+AB_GROUP_A_LABEL = "A"
+AB_GROUP_B_LABEL = "B"
+
+# Feature 3: override
+OVERRIDE_REASON_MIN_LENGTH = 10
+
 # KDE
 KDE_BANDWIDTH = 0.8  # for scipy gaussian_kde stretch goal
 KDE_ENABLED = True

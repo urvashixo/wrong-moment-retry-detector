@@ -45,6 +45,27 @@ create table if not exists retry_decisions (
 );
 create index if not exists idx_retry_decisions_customer on retry_decisions(customer_id);
 
+-- Addendum: Feature 6 A/B split + Feature 4 escalation + override linkage
+alter table retry_decisions add column if not exists experiment_group text check (experiment_group in ('A','B'));
+alter table retry_decisions add column if not exists status text check (status in ('scheduled','needs_human_review','overridden','executed')) default 'scheduled';
+alter table retry_decisions add column if not exists effective_retry_at timestamptz; -- set on override, else = recommended_retry_at
+create index if not exists idx_retry_decisions_experiment on retry_decisions(experiment_group);
+create index if not exists idx_retry_decisions_status on retry_decisions(status);
+
+-- Feature 3: Human override table (never overwrites original recommendation)
+create table if not exists retry_overrides (
+    override_id uuid primary key default gen_random_uuid(),
+    decision_id uuid references retry_decisions(decision_id) on delete cascade,
+    customer_id text references customers(customer_id),
+    original_retry_at timestamptz not null,
+    overridden_retry_at timestamptz not null,
+    reason text not null check (char_length(reason) >= 10),
+    created_by text default 'merchant_ops',
+    created_at timestamptz default now()
+);
+create index if not exists idx_retry_overrides_customer on retry_overrides(customer_id);
+create index if not exists idx_retry_overrides_decision on retry_overrides(decision_id);
+
 -- Batch-level aggregate metrics (for your demo dashboard — Section 6.2)
 create table if not exists demo_batches (
     batch_id uuid primary key default gen_random_uuid(),

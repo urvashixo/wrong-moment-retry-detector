@@ -12,10 +12,15 @@ import os
 from datetime import datetime
 from typing import Any, Dict
 
+import hashlib
+import uuid
+
 import pytz
 
 from backend.db.supabase_client import get_db
 from backend.models.pattern_detector import detect_retry_window, compute_population_hour_prior
+from backend.models.constants import CONFIDENCE_ESCALATION_THRESHOLD, AB_FIXED_RETRY_DAYS
+from backend.models.fallback import fallback_retry_timestamp
 from backend.llm.groq_client import get_groq_client
 from backend.scheduler.retry_executor import schedule_retry
 
@@ -85,39 +90,52 @@ async def handle_razorpay_webhook(raw_payload: Dict[str, Any], headers: Dict[str
             "max_retries_allowed": max_retries,
         }
 
+    # Generate failure event id early for deterministic A/B (Feature 6)
+    pre_failure_id = str(uuid.uuid4())
+    h = hashlib.md5(f"{customer_id}:{pre_failure_id}".encode()).hexdigest()
+    experiment_group = "A" if int(h[:8],16)%2==0 else "B"
+
     # Fetch history
     success_events = db.get_success_events_for_customer(customer_id)
     all_success = db.get_all_success_events()
     pop_hour = compute_population_hour_prior(all_success)
 
-    # Run deterministic model — must decide before LLM
-    decision_core = detect_retry_window(
-        customer_id=customer_id,
-        success_events=success_events,
-        failed_at=failed_at,
-        payment_method=payment_method,
-        population_prior_hour=pop_hour,
-        all_customers_hour_prior=pop_hour,
-        max_retries_allowed=max_retries,
-        retry_attempt_number=retry_attempt,
-    )
+    if experiment_group == "A":
+        recommended = fallback_retry_timestamp(failed_at, pop_hour)
+        decision_core = {"customer_id": customer_id, "recommended_retry_at": recommended, "confidence": 0.0, "basis": "naive_fixed_schedule", "data_points_used": 0, "fallback_used": False, "details": {"ab_group":"A"}}
+        explanation = "Fixed-schedule retry (control group A) — retry in 3 days, no personalization."
+        llm_succeeded = False
+    else:
+        decision_core = detect_retry_window(
+            customer_id=customer_id,
+            success_events=success_events,
+            failed_at=failed_at,
+            payment_method=payment_method,
+            population_prior_hour=pop_hour,
+            all_customers_hour_prior=pop_hour,
+            max_retries_allowed=max_retries,
+            retry_attempt_number=retry_attempt,
+        )
+        groq = get_groq_client()
+        explanation, llm_succeeded = groq.explain_merchant(
+            customer_id=customer_id,
+            recommended_retry_at=decision_core["recommended_retry_at"],
+            confidence=decision_core["confidence"],
+            basis=decision_core["basis"],
+            data_points_used=decision_core["data_points_used"],
+            fallback_used=decision_core["fallback_used"],
+        )
 
-    # LLM explanation (best-effort)
-    groq = get_groq_client()
-    explanation, llm_succeeded = groq.explain_merchant(
-        customer_id=customer_id,
-        recommended_retry_at=decision_core["recommended_retry_at"],
-        confidence=decision_core["confidence"],
-        basis=decision_core["basis"],
-        data_points_used=decision_core["data_points_used"],
-        fallback_used=decision_core["fallback_used"],
-    )
+    # Feature 4 escalation pre-check
+    is_last = (retry_attempt + 1) >= max_retries
+    should_escalate = is_last and float(decision_core["confidence"]) < CONFIDENCE_ESCALATION_THRESHOLD
+    status = "needs_human_review" if should_escalate else "scheduled"
 
-    # Build audit record per spec 6.1 — written BEFORE execution
-    # First, need to store the failure event itself
+    # Build audit record — written BEFORE execution
     try:
         failure_event = db.insert_payment_event(
             {
+                "id": pre_failure_id,
                 "customer_id": customer_id,
                 "mandate_id": mandate_id,
                 "transaction_id": raw_payload.get("transaction_id") or entity.get("id") or f"txn_failed_{customer_id}",
@@ -131,37 +149,43 @@ async def handle_razorpay_webhook(raw_payload: Dict[str, Any], headers: Dict[str
         failure_event_id = failure_event.get("id")
     except Exception as e:
         logger.warning(f"Failed to insert failure event: {e}")
-        failure_event_id = None
+        failure_event_id = pre_failure_id
 
     audit_record = {
         "customer_id": customer_id,
         "mandate_id": mandate_id,
         "original_failure_event_id": failure_event_id,
-        "retry_attempt_number": retry_attempt + 1,  # this will be the next attempt
+        "retry_attempt_number": retry_attempt + 1,
         "max_retries_allowed": max_retries,
         "model_basis": decision_core["basis"],
         "data_points_used": decision_core["data_points_used"],
         "confidence": decision_core["confidence"],
         "fallback_used": decision_core["fallback_used"],
         "recommended_retry_at": decision_core["recommended_retry_at"],
+        "effective_retry_at": decision_core["recommended_retry_at"],
         "llm_explanation": explanation,
         "llm_call_succeeded": llm_succeeded,
         "actual_retry_outcome": "pending",
+        "status": status,
+        "experiment_group": experiment_group,
     }
 
     saved = db.insert_retry_decision(audit_record)
-    logger.info(f"Logged retry decision {saved.get('decision_id')} for {customer_id} basis={decision_core['basis']} conf={decision_core['confidence']}")
+    logger.info(f"Logged retry decision {saved.get('decision_id')} for {customer_id} group={experiment_group} status={status} basis={decision_core['basis']} conf={decision_core['confidence']}")
 
-    # Schedule retry (audit before execution — spec rule 4)
-    try:
-        job = schedule_retry(saved, execute_immediately=False)
-    except Exception as e:
-        logger.warning(f"schedule_retry failed: {e}")
-        job = None
+    job = None
+    if status != "needs_human_review":
+        try:
+            job = schedule_retry(saved, execute_immediately=False)
+        except Exception as e:
+            logger.warning(f"schedule_retry failed: {e}")
+            job = None
 
     return {
-        "status": "scheduled",
+        "status": status,
         "decision": _serialize_decision(saved),
+        "experiment_group": experiment_group,
+        "escalated": should_escalate,
         "job": job,
     }
 

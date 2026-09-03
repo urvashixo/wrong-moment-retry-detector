@@ -8,11 +8,27 @@ const heatFor = (conf, fallback) => {
   return {color:'var(--heat-4)', label:'thin'};
 };
 
-export default function Dashboard({ refreshKey, onSelectCustomer }) {
+export default function Dashboard({ refreshKey, onSelectCustomer, onRefresh }) {
   const [decisions, setDecisions] = useState([]);
   const [metrics, setMetrics] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [explain, setExplain] = useState({}); // decision_id -> {payload, explanation}
+  const [overrideForm, setOverrideForm] = useState(null); // {id, datetime, reason}
   const [loading, setLoading] = useState(true);
+  const doRefresh = onRefresh || (()=>{});
+
+  const callExplain = async (id) => {
+    const r = await fetch(`/api/decisions/${id}/explain`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const j = await r.json();
+    setExplain(prev=>({...prev, [id]: j}));
+  };
+  const submitOverride = async () => {
+    if(!overrideForm) return;
+    if(overrideForm.reason.trim().length < 10) { alert('Reason must be >=10 chars'); return; }
+    const r = await fetch(`/api/decisions/${overrideForm.id}/override`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({new_retry_at: new Date(overrideForm.datetime).toISOString(), reason: overrideForm.reason})});
+    const j = await r.json();
+    if(r.ok){ setOverrideForm(null); doRefresh(); fetchAll(); } else { alert(j.detail||JSON.stringify(j)); }
+  };
 
   const fetchAll = async () => {
     try {
@@ -121,10 +137,13 @@ export default function Dashboard({ refreshKey, onSelectCustomer }) {
                   <span style={{color:'var(--text-dim)'}}>failed {d.failure_reason || 'insufficient_funds'}</span>
                   <span style={{color:'var(--text-dim)'}}>→</span>
                   <span>retry {ist}</span>
-                  <span className="bracket" style={{color: heat.color, borderColor: heat.color}}>
+                    <span className="bracket" style={{color: heat.color, borderColor: heat.color}}>
                     {fallback ? '[ fallback ]' : `[ ${Math.round(conf*100)}% ]`}
                   </span>
                   <span className="hidden md:inline" style={{color:'var(--text-dim)'}}>{basis}</span>
+                  {d.status==='needs_human_review' && <span className="bracket heat-1">[ needs review ]</span>}
+                  {d.status==='overridden' && <span className="bracket" style={{color:'var(--heat-2)', borderColor:'var(--heat-2)'}}>[ overridden ]</span>}
+                  {d.experiment_group && <span className="bracket" style={{color:'var(--text-dim)'}}>[ {d.experiment_group} ]</span>}
                   <span className="ml-auto text-[11px]" style={{color: d.actual_retry_outcome==='success'?'var(--success)': d.actual_retry_outcome==='failed'?'var(--heat-1)':'var(--text-dim)'}}>{d.actual_retry_outcome}</span>
                   <span className="text-[11px]" style={{color:'var(--text-dim)'}}>{d.llm_call_succeeded ? '' : '[ template ]'}</span>
                 </button>
@@ -132,19 +151,42 @@ export default function Dashboard({ refreshKey, onSelectCustomer }) {
                   <div className="px-4 pb-4 grid gap-3" style={{background:'rgba(255,255,255,0.015)', borderTop:'1px solid var(--line)'}}>
                     <div className="grid md:grid-cols-[1.2fr_0.8fr] gap-4 pt-3">
                       <div className="text-xs leading-5">
-                        <div style={{color:'var(--text-dim)'}}>basis <span style={{color:'var(--text-primary)'}}>{basis}</span> · data points <span className="bracket">[ {d.data_points_used} ]</span> · confidence <span style={{color:heat.color}}>[ {Math.round(conf*100)}% ]</span></div>
+                        <div style={{color:'var(--text-dim)'}}>basis <span style={{color:'var(--text-primary)'}}>{basis}</span> · data points <span className="bracket">[ {d.data_points_used} ]</span> · confidence <span style={{color:heat.color}}>[ {Math.round(conf*100)}% ]</span> · status <span className="bracket" style={{color:'var(--text-dim)'}}>[ {d.status||'scheduled'} ]</span> · group <span className="bracket">[ {d.experiment_group||'B'} ]</span></div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <button onClick={()=>callExplain(d.decision_id)} className="text-[11px] px-2 py-1" style={{border:'1px solid var(--line)', color:'var(--text-primary)'}}>Explain this ▸</button>
+                          {explain[d.decision_id] && <button onClick={()=>callExplain(d.decision_id)} className="text-[11px] px-2 py-1" style={{border:'1px solid var(--line)', color:'var(--text-dim)'}}>regenerate</button>}
+                          {d.actual_retry_outcome==='pending' && d.status!=='overridden' && (
+                            <button onClick={()=>setOverrideForm({id:d.decision_id, datetime: new Date(new Date(d.recommended_retry_at).getTime()+86400000).toISOString().slice(0,16), reason:''})} className="text-[11px] px-2 py-1" style={{border:'1px solid var(--heat-2)', color:'var(--heat-2)'}}>Override</button>
+                          )}
+                        </div>
                         <div className="mt-2 flex gap-2">
                           <span className="bracket" style={{color:'var(--text-dim)'}}>[ generated ]</span>
-                          <span style={{color:'var(--text-dim)'}}>LLM explains, does not decide</span>
+                          <span style={{color:'var(--text-dim)'}}>LLM explains, does not decide — read-only</span>
                         </div>
-                        <div className="mt-2" style={{color:'var(--text-primary)'}}>{d.llm_explanation || '—'}</div>
-                        <div className="mt-2 text-[11px]" style={{color:'var(--text-dim)'}}>logged {d.created_at ? new Date(d.created_at).toLocaleString('en-IN') : ''} · audit before execution</div>
+                        <div className="mt-2" style={{color:'var(--text-primary)'}}>{(explain[d.decision_id]?.explanation) || d.llm_explanation || '—'}</div>
+                        {explain[d.decision_id]?.prompt_payload_shown && (
+                          <div className="mt-2 p-2 text-[11px] font-mono" style={{background:'var(--bg)', border:'1px solid var(--line)', color:'var(--text-dim)'}}>
+                            prompt payload shown: {JSON.stringify(explain[d.decision_id].prompt_payload_shown)}
+                          </div>
+                        )}
+                        <div className="mt-2 text-[11px]" style={{color:'var(--text-dim)'}}>logged {d.created_at ? new Date(d.created_at).toLocaleString('en-IN') : ''} · effective {d.effective_retry_at ? new Date(d.effective_retry_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}) : new Date(d.recommended_retry_at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})}</div>
+                        {overrideForm?.id===d.decision_id && (
+                          <div className="mt-3 p-3 space-y-2" style={{border:'1px solid var(--heat-2)', background:'rgba(240,124,46,0.08)'}}>
+                            <div className="text-[11px] tracking-widest">OVERRIDE — human in loop (bounded & gated)</div>
+                            <input type="datetime-local" value={overrideForm.datetime} onChange={e=>setOverrideForm({...overrideForm, datetime:e.target.value})} className="w-full text-xs px-2 py-1" style={{background:'var(--panel)', border:'1px solid var(--line)', color:'var(--text-primary)'}}/>
+                            <input placeholder="reason — why override? (≥10 chars)" value={overrideForm.reason} onChange={e=>setOverrideForm({...overrideForm, reason:e.target.value})} className="w-full text-xs px-2 py-1" style={{background:'var(--panel)', border:'1px solid var(--line)', color:'var(--text-primary)'}}/>
+                            <div className="flex gap-2">
+                              <button onClick={submitOverride} className="text-xs px-3 py-1" style={{background:'var(--heat-2)', color:'white'}}>confirm override</button>
+                              <button onClick={()=>setOverrideForm(null)} className="text-xs px-3 py-1" style={{border:'1px solid var(--line)', color:'var(--text-dim)'}}>cancel</button>
+                            </div>
+                            <div className="text-[11px]" style={{color:'var(--text-dim)'}}>Original <span style={{color:'var(--text-primary)'}}>{new Date(d.recommended_retry_at).toLocaleString()}</span> stays intact — override adds new record.</div>
+                          </div>
+                        )}
                       </div>
                       <div className="text-[11px]" style={{color:'var(--text-dim)'}}>
-                        <div>Hover histogram via customer view on the right. This row’s heat color already encodes confidence — no tooltip needed.</div>
-                        <div className="mt-2 inline-flex gap-2">
-                          <span className="bracket" style={{color:heat.color, borderColor:heat.color}}>[ {basis} ]</span>
-                          <span className="bracket" style={{color:'var(--text-dim)'}}>[ {d.customer_id.slice(0,10)} ]</span>
+                        <div>Hover histogram via customer view on the right. Heat already encodes confidence.</div>
+                        <div className="mt-3">
+                          <button onClick={()=>onSelectCustomer && onSelectCustomer(d.customer_id)} className="text-xs px-2 py-1 w-full" style={{border:'1px solid var(--line)', color:'var(--text-primary)'}}>open profile page</button>
                         </div>
                       </div>
                     </div>

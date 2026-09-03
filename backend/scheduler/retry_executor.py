@@ -29,7 +29,9 @@ def schedule_retry(decision: Dict[str, Any], execute_immediately: bool = False) 
     Returns job info.
     """
     job_id = str(decision.get("decision_id") or uuid.uuid4())
-    recommended = decision.get("recommended_retry_at")
+    # Feature 3: prefer effective_retry_at if overridden
+    raw = decision.get("effective_retry_at") or decision.get("recommended_retry_at")
+    recommended = raw
     if isinstance(recommended, str):
         try:
             recommended = datetime.fromisoformat(recommended.replace("Z", "+00:00"))
@@ -43,6 +45,9 @@ def schedule_retry(decision: Dict[str, Any], execute_immediately: bool = False) 
         "decision_id": decision.get("decision_id"),
         "customer_id": decision.get("customer_id"),
         "recommended_retry_at": recommended,
+        "effective_retry_at": recommended,
+        "original_retry_at": decision.get("recommended_retry_at"),
+        "is_overridden": decision.get("status") == "overridden",
         "status": "scheduled",
         "created_at": datetime.now(UTC),
     }
