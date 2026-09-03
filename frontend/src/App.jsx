@@ -1,11 +1,12 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import LandingPage from './pages/LandingPage.jsx';
 import FeedPage from './pages/FeedPage.jsx';
 import ReviewPage from './pages/ReviewPage.jsx';
 import DiffPage from './pages/DiffPage.jsx';
 import ABPage from './pages/ABPage.jsx';
 import ProfileRoute from './pages/ProfileRoute.jsx';
+import ErrorBoundary from './ErrorBoundary.jsx';
 
 function Navbar(){
   const linkStyle = ({isActive}) => ({
@@ -54,19 +55,21 @@ function Footer(){
 export default function App(){
   return (
     <BrowserRouter>
-      <div className="min-h-screen" style={{background:'var(--bg)', color:'var(--text-primary)'}}>
-        <Navbar />
-        <Routes>
-          <Route path="/" element={<LandingPage />} />
-          <Route path="/feed" element={<FeedPage />} />
-          <Route path="/review" element={<ReviewPage />} />
-          <Route path="/diff" element={<DiffPage />} />
-          <Route path="/ab" element={<ABPage />} />
-          <Route path="/profile/:customerId" element={<ProfileRoute />} />
-          <Route path="*" element={<LandingPage />} />
-        </Routes>
-        <Footer />
-      </div>
+      <ErrorBoundary>
+        <div className="min-h-screen" style={{background:'var(--bg)', color:'var(--text-primary)'}}>
+          <Navbar />
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/feed" element={<FeedPage />} />
+            <Route path="/review" element={<ReviewPage />} />
+            <Route path="/diff" element={<DiffPage />} />
+            <Route path="/ab" element={<ABPage />} />
+            <Route path="/profile/:customerId" element={<ProfileRoute />} />
+            <Route path="*" element={<LandingPage />} />
+          </Routes>
+          <Footer />
+        </div>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }

@@ -8,7 +8,7 @@ export default function NeedsReview({ refreshKey, onOpen }) {
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   }).then(d=>{setList(d.decisions||[]); setLoading(false); setErr(null)}).catch(e=>{setErr(e.message); setLoading(false);});
-  useEffect(()=>fetchList(),[refreshKey]);
+  useEffect(()=>{ fetchList(); },[refreshKey]);
   useEffect(()=>{ const id=setInterval(fetchList,4000); return ()=>clearInterval(id); },[]);
 
   const injectEscalation = async () => {
