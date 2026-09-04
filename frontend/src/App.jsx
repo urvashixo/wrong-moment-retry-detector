@@ -65,6 +65,7 @@ export default function App(){
             <Route path="/diff" element={<DiffPage />} />
             <Route path="/ab" element={<ABPage />} />
             <Route path="/profile/:customerId" element={<ProfileRoute />} />
+            <Route path="/customers/:customerId" element={<ProfileRoute />} />
             <Route path="*" element={<LandingPage />} />
           </Routes>
           <Footer />

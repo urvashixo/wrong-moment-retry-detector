@@ -439,21 +439,19 @@ def needs_review():
 
 @app.get("/api/customers/{customer_id}/profile")
 def customer_profile(customer_id: str):
-    """Feature 1: Per-customer profile page."""
+    """Feature 1: Per-customer profile page — spec shape Section 4."""
     db = get_db()
     customers = db.list_customers()
     cust = next((c for c in customers if c["customer_id"] == customer_id), None)
     if not cust:
         raise HTTPException(status_code=404, detail="Customer not found")
     events = db.list_payment_events(customer_id=customer_id)
-    # sort timeline: attempted_at asc
     try:
         events_sorted = sorted(events, key=lambda e: e.get("attempted_at") or "")
     except Exception:
         events_sorted = events
     success_events = [e for e in events if e["status"] == "success"]
-    histogram = _build_histogram_payload(success_events)
-    # timeline: include both success and failed plotted
+    histogram_raw = _build_histogram_payload(success_events)
     decisions = db.list_retry_decisions(customer_id=customer_id)
     try:
         decisions_sorted = sorted(decisions, key=lambda d: d.get("created_at") or "", reverse=True)
@@ -461,27 +459,148 @@ def customer_profile(customer_id: str):
         decisions_sorted = decisions
     latest = decisions_sorted[0] if decisions_sorted else None
     overrides = db.list_overrides(customer_id=customer_id)
-    # determine status
-    if not success_events:
-        status_label = "cold-start"
+    # find active override on current decision
+    active_override = None
+    if latest:
+        ov = db.get_override_for_decision(str(latest.get("decision_id")))
+        if ov:
+            active_override = ov
+    # status badge - computed from real fields, not hand-picked
+    # spec: active / cold_start (<min) / low_confidence (erratic) / needs_review / overridden
+    if latest and str(latest.get("status")) == "overridden":
+        status_label = "overridden"
+    elif latest and str(latest.get("status")) == "needs_human_review":
+        status_label = "needs_review"
+    elif len(success_events) < 3:  # MIN_DATA_POINTS_FOR_CONFIDENCE
+        status_label = "cold_start"
     elif latest and float(latest.get("confidence", 1)) < 0.4:
-        status_label = "erratic-low-confidence"
+        status_label = "low_confidence"
     else:
         status_label = "active"
 
+    # stats first/last seen
+    def _to_dt(v):
+        if isinstance(v, str):
+            try:
+                return datetime.fromisoformat(v.replace("Z","+00:00"))
+            except Exception:
+                return None
+        return v if isinstance(v, datetime) else None
+    first_seen = None
+    last_seen = None
+    if events_sorted:
+        first_seen = _to_dt(events_sorted[0].get("attempted_at"))
+        last_seen = _to_dt(events_sorted[-1].get("attempted_at"))
+
+    # histogram per spec: buckets array computed same as decision pipeline, insufficient_data handling
+    basis = latest.get("model_basis") if latest else None
+    insufficient = False
+    buckets = []
+    # choose source histogram based on basis
+    from backend.models.constants import MIN_DATA_POINTS_FOR_CONFIDENCE
+    if not latest or (latest.get("fallback_used")) or len(success_events) < MIN_DATA_POINTS_FOR_CONFIDENCE or basis == "fallback_default":
+        insufficient = True
+    else:
+        if basis and "day_of_month" in basis:
+            counts = histogram_raw.get("dom_histogram", {})
+            buckets = [{"bucket": i, "count": int(counts.get(i, 0))} for i in range(1, 32)]
+        elif basis and "day_of_week" in basis:
+            counts = histogram_raw.get("dow_histogram", {})
+            buckets = [{"bucket": i, "count": int(counts.get(i, 0))} for i in range(0, 7)]
+        elif basis and "hour_of_day" in basis:
+            counts = histogram_raw.get("hod_histogram", {})
+            buckets = [{"bucket": i, "count": int(counts.get(i, 0))} for i in range(0, 24)]
+        else:
+            # default show dom
+            counts = histogram_raw.get("dom_histogram", {})
+            buckets = [{"bucket": i, "count": int(counts.get(i, 0))} for i in range(1, 32)]
+
+    histogram_spec = {
+        "basis": basis,
+        "buckets": buckets,
+        "insufficient_data": insufficient,
+    }
+
+    # current_decision per spec
+    current_decision = None
+    if latest:
+        # map status to spec decision_status
+        dec_status = latest.get("status") or "scheduled"
+        # escalation_reason if needs_review
+        esc_reason = None
+        if dec_status == "needs_human_review":
+            esc_reason = "last_attempt_low_confidence"
+        current_decision = {
+            "decision_id": latest.get("decision_id"),
+            "recommended_retry_at": _serialize(latest.get("recommended_retry_at")),
+            "confidence": latest.get("confidence"),
+            "model_basis": latest.get("model_basis"),
+            "data_points_used": latest.get("data_points_used"),
+            "fallback_used": latest.get("fallback_used"),
+            "decision_status": dec_status,
+            "escalation_reason": esc_reason,
+            "llm_explanation": latest.get("llm_explanation"),
+            "experiment_group": ("B_smart" if latest.get("experiment_group")=="B" else "A_naive" if latest.get("experiment_group")=="A" else latest.get("experiment_group")),
+            "effective_retry_at": _serialize(latest.get("effective_retry_at") or latest.get("recommended_retry_at")),
+            "actual_retry_outcome": latest.get("actual_retry_outcome"),
+            "created_at": _serialize(latest.get("created_at")),
+        }
+
+    active_override_spec = None
+    if active_override:
+        active_override_spec = {
+            "algorithm_recommended_at": _serialize(active_override.get("original_retry_at")),
+            "overridden_retry_at": _serialize(active_override.get("overridden_retry_at")),
+            "override_reason": active_override.get("reason"),
+            "overridden_by": active_override.get("created_by") or "merchant_ops",
+            "override_id": active_override.get("override_id"),
+            "created_at": _serialize(active_override.get("created_at")),
+        }
+
+    # decision_history per spec
+    decision_history = []
+    for d in decisions_sorted:
+        decision_history.append({
+            "decision_id": d.get("decision_id"),
+            "created_at": _serialize(d.get("created_at")),
+            "recommended_retry_at": _serialize(d.get("recommended_retry_at")),
+            "effective_retry_at": _serialize(d.get("effective_retry_at") or d.get("recommended_retry_at")),
+            "confidence": d.get("confidence"),
+            "model_basis": d.get("model_basis"),
+            "outcome": d.get("actual_retry_outcome"),
+            "experiment_group": ("B_smart" if d.get("experiment_group")=="B" else "A_naive" if d.get("experiment_group")=="A" else d.get("experiment_group")),
+            "status": d.get("status"),
+        })
+
+    # keep backward compat fields too
     return {
-        "customer": _serialize(cust),
+        # spec shape
+        "customer_id": customer_id,
+        "mandate_id": f"mandate_{customer_id}",
         "status": status_label,
+        "stats": {
+            "total_events": len(events),
+            "success_count": len(success_events),
+            "failed_count": sum(1 for e in events if e["status"] == "failed"),
+            "first_seen": _serialize(first_seen) if first_seen else None,
+            "last_seen": _serialize(last_seen) if last_seen else None,
+        },
+        "payment_history": _serialize(events_sorted),
+        "histogram": histogram_spec,
+        "current_decision": current_decision,
+        "active_override": active_override_spec,
+        "decision_history": decision_history,
+        # backward compat for existing frontend
+        "customer": _serialize(cust),
         "total_history": len(events),
         "success_count": len(success_events),
         "failed_count": sum(1 for e in events if e["status"] == "failed"),
-        "mandate_id": f"mandate_{customer_id}",
         "timeline": _serialize(events_sorted),
-        "histogram": histogram,
         "histogram_basis": (latest.get("model_basis") if latest else None),
         "latest_decision": _serialize(latest) if latest else None,
-        "decision_history": _serialize(decisions_sorted),
         "override_history": _serialize(overrides),
+        # also expose raw histogram for old detail view
+        "histogram_raw": histogram_raw,
     }
 
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const heatFor = (conf, fallback) => {
   if (fallback) return {color:'var(--text-dim)', label:'fallback'};
@@ -9,6 +10,7 @@ const heatFor = (conf, fallback) => {
 };
 
 export default function Dashboard({ refreshKey, onSelectCustomer, onRefresh }) {
+  const navigate = useNavigate();
   const [decisions, setDecisions] = useState([]);
   const [metrics, setMetrics] = useState(null);
   const [expanded, setExpanded] = useState(null);
@@ -128,12 +130,17 @@ export default function Dashboard({ refreshKey, onSelectCustomer, onRefresh }) {
             const isOpen = expanded===d.decision_id;
             return (
               <div key={d.decision_id} style={{borderBottom:'1px solid var(--line)'}}>
-                <button
+                <div
                   onClick={()=>{ setExpanded(isOpen?null:d.decision_id); onSelectCustomer && onSelectCustomer(d.customer_id); }}
-                  className="w-full text-left px-4 py-3 flex flex-wrap items-center gap-2 text-xs hover:opacity-90"
+                  className="w-full text-left px-4 py-3 flex flex-wrap items-center gap-2 text-xs hover:opacity-90 cursor-pointer"
                   style={{background: isOpen ? 'rgba(255,255,255,0.02)' : 'transparent'}}
                 >
-                  <span className="bracket" style={{color:'var(--text-dim)', minWidth:'92px'}}>[ {String(d.customer_id).slice(0,12)} ]</span>
+                  <button
+                    onClick={(e)=>{ e.stopPropagation(); navigate(`/customers/${d.customer_id}`); }}
+                    className="bracket hover:opacity-80 text-left"
+                    style={{color:'var(--text-primary)', borderColor:'var(--line)', background:'var(--panel)', minWidth:'92px'}}
+                    title="open profile page /customers/:id"
+                  >[ {String(d.customer_id).slice(0,12)} ]</button>
                   <span style={{color:'var(--text-dim)'}}>failed {d.failure_reason || 'insufficient_funds'}</span>
                   <span style={{color:'var(--text-dim)'}}>→</span>
                   <span>retry {ist}</span>
@@ -146,7 +153,7 @@ export default function Dashboard({ refreshKey, onSelectCustomer, onRefresh }) {
                   {d.experiment_group && <span className="bracket" style={{color:'var(--text-dim)'}}>[ {d.experiment_group} ]</span>}
                   <span className="ml-auto text-[11px]" style={{color: d.actual_retry_outcome==='success'?'var(--success)': d.actual_retry_outcome==='failed'?'var(--heat-1)':'var(--text-dim)'}}>{d.actual_retry_outcome}</span>
                   <span className="text-[11px]" style={{color:'var(--text-dim)'}}>{d.llm_call_succeeded ? '' : '[ template ]'}</span>
-                </button>
+                </div>
                 {isOpen && (
                   <div className="px-4 pb-4 grid gap-3" style={{background:'rgba(255,255,255,0.015)', borderTop:'1px solid var(--line)'}}>
                     <div className="grid md:grid-cols-[1.2fr_0.8fr] gap-4 pt-3">
@@ -184,9 +191,10 @@ export default function Dashboard({ refreshKey, onSelectCustomer, onRefresh }) {
                         )}
                       </div>
                       <div className="text-[11px]" style={{color:'var(--text-dim)'}}>
-                        <div>Hover histogram via customer view on the right. Heat already encodes confidence.</div>
-                        <div className="mt-3">
-                          <button onClick={()=>onSelectCustomer && onSelectCustomer(d.customer_id)} className="text-xs px-2 py-1 w-full" style={{border:'1px solid var(--line)', color:'var(--text-primary)'}}>open profile page</button>
+                        <div>Hover histogram via customer view on the right. Heat already encodes confidence. Click <span className="bracket">[ cust_* ]</span> or button to open full profile page at <span className="bracket">[ /customers/:id ]</span></div>
+                        <div className="mt-3 flex gap-2">
+                          <button onClick={()=>navigate(`/customers/${d.customer_id}`)} className="flex-1 text-xs py-1" style={{background:'var(--heat-1)', color:'white', border:'1px solid var(--heat-1)'}}>open profile page</button>
+                          <button onClick={()=>onSelectCustomer && onSelectCustomer(d.customer_id)} className="flex-1 text-xs py-1" style={{border:'1px solid var(--line)', color:'var(--text-dim)'}}>quick preview</button>
                         </div>
                       </div>
                     </div>

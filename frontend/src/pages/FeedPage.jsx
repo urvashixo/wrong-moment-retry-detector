@@ -29,14 +29,14 @@ export default function FeedPage(){
           {profileId ? (
             <ProfilePage customerId={profileId} onClose={()=>setProfileId(null)} />
           ) : selectedCustomer ? (
-            <CustomerDetail customerId={selectedCustomer} onClose={()=>setSelectedCustomer(null)} />
+            <div className="space-y-3">
+              <CustomerDetail customerId={selectedCustomer} onClose={()=>setSelectedCustomer(null)} />
+              <button onClick={()=>navigate(`/customers/${selectedCustomer}`)} className="w-full text-xs py-2" style={{background:'var(--heat-1)', color:'white', border:'1px solid var(--heat-1)'}}>open profile page → /customers/{selectedCustomer.slice(0,12)}</button>
+            </div>
           ) : (
             <div className="panel p-6 text-xs leading-5" style={{color:'var(--text-dim)'}}>
               Select a decision row — it expands inline (no modal). The number is computed; the sentence is <span className="bracket">[ generated ]</span>.
-              <div className="mt-4 flex gap-2">
-                <button onClick={()=>selectedCustomer && setProfileId(selectedCustomer)} className="text-[11px] px-2 py-1" style={{border:'1px solid var(--heat-1)', color:'var(--heat-1)'}}>open full profile page</button>
-                <button onClick={()=>selectedCustomer && navigate(`/profile/${selectedCustomer}`)} className="text-[11px] px-2 py-1" style={{border:'1px solid var(--line)'}}>profile via URL</button>
-              </div>
+              <div className="mt-3 text-[11px]">Click <span className="bracket heat-1">[ open profile page ]</span> below or click any <span className="bracket">[ cust_* ]</span> ID to land on <span style={{color:'var(--text-primary)'}}>/customers/{'{id}'}</span></div>
             </div>
           )}
           <div className="panel p-4">
@@ -45,10 +45,10 @@ export default function FeedPage(){
               <input id="profileInput" placeholder="cust_..." className="flex-1 text-xs px-2 py-1" style={{background:'var(--bg)', border:'1px solid var(--line)', color:'var(--text-primary)'}} />
               <button onClick={()=>{
                 const v=document.getElementById('profileInput').value.trim();
-                if(v) navigate(`/profile/${v}`);
+                if(v) navigate(`/customers/${v}`);
               }} className="text-xs px-3 py-1" style={{border:'1px solid var(--line)'}}>go</button>
             </div>
-            <div className="mt-2 text-[11px]" style={{color:'var(--text-dim)'}}>URL-synced: <span style={{color:'var(--text-primary)'}}>/profile/:customerId</span> — shareable, back-button works.</div>
+            <div className="mt-2 text-[11px]" style={{color:'var(--text-dim)'}}>URL-synced: <span style={{color:'var(--text-primary)'}}>/customers/{'{id}'}</span> — shareable, back-button works. Also <span style={{color:'var(--text-primary)'}}>/profile/:id</span> alias.</div>
           </div>
         </div>
       </div>
