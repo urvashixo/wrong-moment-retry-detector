@@ -4,7 +4,6 @@
 
 > **Core rule:** The deterministic model decides *when* to retry. The LLM (Groq) only explains the decision — never makes it. All decisions are logged *before* execution (audit-first).
 
----
 
 ## 1. Problem & Solution
 
