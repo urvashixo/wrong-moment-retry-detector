@@ -4,7 +4,6 @@ This is the detailed spec for Feature 1 from the addendum doc. One URL per custo
 
 **The page's job:** let a judge or merchant ops person land on one customer and answer, without clicking anywhere else — *"why does the system believe what it believes about this person, what did it decide, and did a human ever step in?"*
 
----
 
 ## 1. Section-by-Section Contents
 
