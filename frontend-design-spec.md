@@ -2,7 +2,6 @@
 
 This spec covers **visual design only**: the landing page (currently missing) and a redesign of the dashboard (currently generic). It assumes the backend/data spec already covered elsewhere.
 
----
 
 ## 0. Grounding
 
